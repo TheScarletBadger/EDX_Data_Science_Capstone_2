@@ -1,0 +1,267 @@
+---
+title: "Terminal vs non-terminal predictors of age in Blacklip Abalone (Haliotis rubra)"
+author: "Barry Crouch"
+date: "07/01/2020"
+output: pdf_document
+bibliography: 'Bibliography.bibtex'
+---
+
+## Introduction
+Blacklip abalone (H. rubra) are aquatic gastropods belonging to the genus Haliotis. Their shells, prized for their pearlescent colors are composed of alternating layers of calcium carbonate and protein. Each year a new protein / carbonate layer is deposited. The age of an abalone can therefore be determined by cutting a cross section through the shell, staining and examination under microscope. This proces is labor intensive and time consuming and so numerous efforts have been made to estimate the age of abalone using only rapidly obtainable metrics. However many parameters strongly predictive of age such as dry shell weight require that the animal is culled. This could present a significant ethical conundrum for researchers monitoring the wild population of endangered abalone species. Here we will first examine to what degree the age of an abaline can be determined using regression modelling based on parameters routinely collected by biologists. We shall also examine whether similar results can be obtained when only measurements that do not require culling of the animal are used.
+
+\newpage
+## Libraries
+In addition to base R, This project utilized the tidyverse and caret packages. The knitr and gridExtra packages also utilized during creation of this report.
+```{r,message=FALSE,echo=FALSE,warning=FALSE}
+library(knitr)
+library(tidyverse)
+library(caret)
+library(gridExtra)
+```
+## Methods
+### The Abalone dataset
+This project made use of the publically available 'Abalone data set', a subset of data collected as part of a previously published population biology study @nash1978population. The version used here is presently available via the University of California, Irvine's machine learning repository. A copy of the dataset (.csv format) was also uploaded to the edx platform alongside this report.
+
+http://archive.ics.uci.edu/ml/datasets/Abalone
+
+The following code can be used to load the abalone dataset to a dataframe with column names as specified in the documentation (see 'attribute information' in URL above). An additional binary column is also added at this stage (described below). Numeric variables were also scaled via division by 200 in the UCI hosted data set. This is reversed here to return data to their original (standard) units.
+
+```{r}
+#read data from file to dataframe
+fname = 'abalone.csv'
+alldata = data.frame(read.csv(file=fname, header=FALSE, sep=","))
+#rename columns as described in documentation
+alldata = alldata %>% rename(sex = V1, length = V2, diameter = V3, height = V4,
+                             whole_weight = V5, shucked_weight = V6, viscera_weight = V7,
+                             shell_weight = V8, rings = V9)
+#add new binary variable to denote adult or infant
+alldata = alldata %>% mutate(adult = !str_detect(sex,'I'))
+alldata[,2:8] = alldata[,2:8]*200
+```
+The dataframe now consists of 10 variables (columns) recorded for 4177 animals (rows). The first 10 entries are displayed below.
+```{r,echo=FALSE}
+kable(alldata[1:10,])
+```
+
+\newpage
+In brief these variables represent;
+
+* Sex (non-terminal) - The sex of the animal (M = male, F = female, I = infant)
+* Length (non-terminal) - Length of shell at longest point (mm)
+* Diameter (non-terminal) - Measurement of shell perpendicular to axis of length measurement (mm)
+* Height (non-terminal) - Height measured with animal in shell (mm)
+* Whole weight (non-terminal) - Weight of whole animal (g)
+* Shucked weight (terminal) - Weight of body after removal from shell (g)
+* viscera weight (terminal) - Weight of gut after bleeding (g)
+* Shell weight (terminal) - Weight of shell after being dried post removal of animal (g)
+* Rings - Rings counted after sectioning and staining of shell (+1.5 converts n rings to age in years)
+* Adult - Boolean simply indicating whether or not animal has reached sexual maturity
+
+### Training and testing partitions
+Before exploring the data further it is nessecary to draw off a fraction of the data to used for final validation of models. The original dataframe 'fulldata' is divided into a training set (80% of data) and a test set (remaining 20%). These are allocated to the variable names 'trainset' and 'testset' rerspectively.
+
+```{r,message=FALSE,warning=FALSE}
+#draw off validation set (20%)
+set.seed(1988,sample.kind = 'Rounding')
+inds = createDataPartition(alldata$rings, p = 0.2, times = 1, list = FALSE)
+trainset = alldata[-inds,]
+testset = alldata[inds,]
+```
+The training and testibg subset are approximately equivalent in their representation of subject age (ring count). The test set is therefore representative of the training data. The (now redundant) dataframe 'fulldata' can be erased to recover memory.
+
+```{r, fig.width=6, fig.height=4, message=FALSE, fig.align="center",echo=FALSE}
+alldata = alldata %>% mutate(train = 0)
+alldata$train[-inds] = 1
+alldata = alldata %>% mutate(subset = ifelse(train == 1,'Training set','Test set'))
+alldata %>% ggplot() + aes(x=rings,color = subset) + geom_density() + 
+  ggtitle('Train and test sets: Age distribution') + xlab('Number of rings in shell')
+rm(alldata)
+invisible(gc())
+```
+
+\newpage
+##  Exploratory analysis 1: Effect of sex / maturity
+Abalone species do not exhibit sexual dimorphism @ali2009 therefore it is unlikely that predictors contained in the training set will vary substantially by sex. Howeve it is highly likely that they will vary by whether or not the animal has reached sexual maturity. A preliminary visualization is therefore required to confirm these assumptions.
+
+```{r, echo=FALSE}
+p1 = trainset %>% ggplot(aes(x = sex, y=length, color = sex)) + geom_boxplot() + theme(legend.position = "none") 
+p2 = trainset %>% ggplot(aes(x = sex, y=diameter, color = sex)) + geom_boxplot() + theme(legend.position = "none") 
+p3 = trainset %>% ggplot(aes(x = sex, y=height, color = sex)) + geom_boxplot() + theme(legend.position = "none") 
+p4 = trainset %>% ggplot(aes(x = sex, y=whole_weight, color = sex)) + geom_boxplot() + theme(legend.position = "none") 
+p5 = trainset %>% ggplot(aes(x = sex, y=shucked_weight, color = sex)) + geom_boxplot() + theme(legend.position = "none") 
+p6 = trainset %>% ggplot(aes(x = sex, y=viscera_weight, color = sex)) + geom_boxplot() + theme(legend.position = "none")
+p7 = trainset %>% ggplot(aes(x = sex, y=shell_weight, color = sex)) + geom_boxplot()
+grid.arrange(p1, p2, p3, p4, p5, p6, p7, ncol=3)
+```
+The results indicate that there is little point in discriminating between male and female abalone but it may be adviasble to stratify models according to whether the animal has reached maturity or not.
+
+## Exploratory analysis 2: Relationship between predictors and ring count in adult vs infant abalone
+Most organisms do not grow continuously throught their lifespan. It is therefore intuitive that the physical dimensions of infant abalone will be more predictive of age than for adults whos physical growth has plateaud. If the relationship of predictive variables to age does in fact depend upon life stage, this would imply that adault and infant abalone are best modelled seperately. This can be explored by plotting ring count against each predictor for adults and infants individually using geom_smooth with method set to general linear model.
+
+\newpage
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+p1 = trainset %>% ggplot(aes(x = length, y=rings, color = adult)) + geom_smooth(method='glm', formula= y~x) +   theme(legend.position = "none")
+p2 = trainset %>% ggplot(aes(x = diameter, y=rings, color = adult)) + geom_smooth(method='glm', formula= y~x) +   theme(legend.position = "none")
+p3 = trainset %>% ggplot(aes(x = height, y=rings, color = adult)) + geom_smooth(method='glm', formula= y~x) +   theme(legend.position = "none")
+p4 = trainset %>% ggplot(aes(x = whole_weight, y=rings, color = adult)) + geom_smooth(method='glm', formula= y~x) +   theme(legend.position = "none")
+p5 = trainset %>% ggplot(aes(x = shucked_weight, y=rings, color = adult)) + geom_smooth(method='glm', formula= y~x) +   theme(legend.position = "none")
+p6 = trainset %>% ggplot(aes(x = viscera_weight, y=rings, color = adult)) + geom_smooth(method='glm', formula= y~x) +   theme(legend.position = "none")
+p7 = trainset %>% ggplot(aes(x = shell_weight, y=rings, color = adult)) + geom_smooth(method='glm', formula= y~x) 
+
+grid.arrange(p1, p2, p3, p4, p5, p6, p7, ncol = 2)
+```
+
+The results indicate that the relationship between ring count and each predictor is indeed steeper among infant abalone (adult = FALSE) than for adults (adult = TRUE). Therefore it is adviasable that separate models are applied to predict the age of infant and adult abalone.
+
+
+## Infant abalone
+The training and test datasets were filtered to produce train and test data containing only infant abalone. It is crucial to note that this filtration was performed using the 'adult' boolean variable, derived from the sex categorical variable.
+```{r}
+infant_train = filter(trainset,!adult)
+infant_test = filter(testset,!adult)
+```
+### Naive benchmark
+A benchmark for model performance was calculated by determining the root mean squared error (RMSE) between actual ring counts in the training set and a vector of the same length where every entry is set to the average ring count. The result is approximately 2.46 rings. Age estimates based on this model alone can therefore be expected to be off by 2 and a half years on average.
+
+\newpage
+```{r}
+#RMSE calculation function
+rmse = function(yhat,y){
+  e = y-yhat
+  se = e^2
+  mse = mean(se)
+  sqrt(mse)}
+mu = mean(infant_train$rings)
+y = infant_train$rings
+yhat = (y*0)+mu
+#naine baseline
+rmse(y,yhat)
+```
+
+### Model training
+1 linear model, 1 general linear model and 1 k-nearest neighbours (KNN) model were trained on the infant tarining set using all available predictors. A further 3 corresponding models were trained using only non-terminal predictors. KNN models were tuned to minimal RMSE (bootstrap) using k values from 1 to 101. Trained models were then tested using the infant test set. Performance on the test set was quantified by RMSE between actual (y) and predicted (yhat) values.
+```{r}
+#Model training / tuning
+KNN_tunegrid = data.frame(k = seq(1,101,2))
+LM_terminal = train(rings~length+diameter+height+whole_weight+shucked_weight+
+                      viscera_weight+shell_weight, method = 'lm',data=infant_train)
+GLM_terminal = train(rings~length+diameter+height+whole_weight+shucked_weight+
+                       viscera_weight+shell_weight,method = 'glm',data=infant_train)
+KNN_terminal = train(rings~length+diameter+height+whole_weight+shucked_weight+
+                       viscera_weight+shell_weight,method = 'knn',data=infant_train,
+                     tuneGrid = KNN_tunegrid)
+LM_nonterminal = train(rings~length+diameter+height+whole_weight,
+           method = 'lm',data=infant_train)
+GLM_nonterminal = train(rings~length+diameter+height+whole_weight,
+           method = 'glm',data=infant_train)
+KNN_nonterminal = train(rings~length+diameter+height+whole_weight,
+           method = 'knn',data=infant_train,tuneGrid = KNN_tunegrid)
+
+#KNN model tuning curves
+p1 = plot(KNN_terminal,main='All predictors')
+p2 = plot(KNN_nonterminal,main='Non-terminal predictors')
+grid.arrange(p1, p2, ncol = 2)
+
+#Model testing
+lm_t_perf = rmse(predict(LM_terminal,infant_test),t(infant_test$rings))
+lm_n_perf = rmse(predict(LM_nonterminal,infant_test),t(infant_test$rings))
+glm_t_perf = rmse(predict(GLM_terminal,infant_test),t(infant_test$rings))
+glm_n_perf = rmse(predict(GLM_nonterminal,infant_test),t(infant_test$rings))
+knn_t_perf = rmse(predict(KNN_terminal,infant_test),t(infant_test$rings))
+knn_n_perf = rmse(predict(KNN_nonterminal,infant_test),t(infant_test$rings))
+```
+### Results 1 - Performance summary
+The below table provides a summary of the predicted (bootstrap) RMSE for each model as well as the 'actual' RMSE obtained from testing on the infant test set. The difference between the actual RMSE of models using all parameters vs those using only non-terminal parameters in the loss column (non-terminal RMSE - all parameter RMSE).
+The results indicate first that all models out-performed the naive benchmark. While model methods were broadly equivalent simple linear models achieved the highest accuracy. Critically models using terminal predictors consistently outperformed those using terminal parameters. In real terms however the difference in performance is negligable (~0.15 years). As age is calculated as an integer this discrepancy is likely of little consequence indicating that, at least for infants, terminal methods do not offer a significant benefit over those which do not require cull.
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+terminal_pred = c(min(LM_terminal$results["RMSE"]),min(GLM_terminal$results["RMSE"]),
+                  min(KNN_terminal$results["RMSE"]))
+nonterminal_pred = c(min(LM_nonterminal$results["RMSE"]),min(GLM_nonterminal$results["RMSE"]),
+                  min(KNN_nonterminal$results["RMSE"]))
+terminal_perf = c(lm_t_perf,glm_t_perf,knn_t_perf)
+nonterminal_perf = c(lm_n_perf,glm_n_perf,knn_n_perf)
+modelnames = c('Linear model','General linear model','K-nearest neighbours')
+
+perfreport = data.frame(Method = modelnames,terminal_predicted = terminal_pred,terminal_actual = terminal_perf,
+                        nonterminal_predicted = nonterminal_pred, nonterminal_actual = nonterminal_perf,
+                        loss = nonterminal_perf - terminal_perf)
+  
+kable(perfreport, align = c('c','c','c','c','c','c'))
+```
+
+\newpage
+## Adult abalone
+In this section the precise steps used for the infant datasets are repeated for the adult datasets. For the sake of brevity, and to avoid repetition only the corresponding code is presented.
+```{r}
+adult_train = filter(trainset,adult)
+adult_test = filter(testset,adult)
+```
+### Naive benchmark
+```{r}
+mu = mean(adult_train$rings)
+y = adult_train$rings
+yhat = (y*0)+mu
+#naine baseline
+rmse(y,yhat)
+```
+### Model training
+1 linear model, 1 general linear model and 1 k-nearest neighbours (KNN) model were trained on the infant tarining set using all available predictors. A further 3 corresponding models were trained using only non-terminal predictors. KNN models were tuned to minimal RMSE (bootstrap) using k values from 1 to 101. Trained models were then tested using the infant test set. Performance on the test set was quantified by RMSE between actual (y) and predicted (yhat) values.
+```{r}
+#Model training / tuning
+KNN_tunegrid = data.frame(k = seq(1,101,2))
+LM_terminal = train(rings~length+diameter+height+whole_weight+shucked_weight+
+                      viscera_weight+shell_weight, method = 'lm',data=adult_train)
+GLM_terminal = train(rings~length+diameter+height+whole_weight+shucked_weight+
+                       viscera_weight+shell_weight,method = 'glm',data=adult_train)
+KNN_terminal = train(rings~length+diameter+height+whole_weight+shucked_weight+
+                       viscera_weight+shell_weight,method = 'knn',data=adult_train,
+                     tuneGrid = KNN_tunegrid)
+LM_nonterminal = train(rings~length+diameter+height+whole_weight,
+           method = 'lm',data=adult_train)
+GLM_nonterminal = train(rings~length+diameter+height+whole_weight,
+           method = 'glm',data=adult_train)
+KNN_nonterminal = train(rings~length+diameter+height+whole_weight,
+           method = 'knn',data=adult_train,tuneGrid = KNN_tunegrid)
+#KNN model tuning curves
+p1 = plot(KNN_terminal,main='All predictors')
+p2 = plot(KNN_nonterminal,main='Non-terminal predictors')
+grid.arrange(p1, p2, ncol = 2)
+
+#Model testing
+lm_t_perf = rmse(predict(LM_terminal,adult_test),t(adult_test$rings))
+lm_n_perf = rmse(predict(LM_nonterminal,adult_test),t(adult_test$rings))
+glm_t_perf = rmse(predict(GLM_terminal,adult_test),t(adult_test$rings))
+glm_n_perf = rmse(predict(GLM_nonterminal,adult_test),t(adult_test$rings))
+knn_t_perf = rmse(predict(KNN_terminal,adult_test),t(adult_test$rings))
+knn_n_perf = rmse(predict(KNN_nonterminal,adult_test),t(adult_test$rings))
+```
+
+### Results 2 - Performance summary
+In line with pedictions the RMSE values for all models including the naive model were larger for adult abalone than for infants. Again all models outperformed the naive benchmark however in this case, the k-nearest neighbors method proved more accurate. Again excluding terminal parameters decreased the accuracy of all methods by ~0.42 - 0.45 rings. 
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+terminal_pred = c(min(LM_terminal$results["RMSE"]),min(GLM_terminal$results["RMSE"]),
+                  min(KNN_terminal$results["RMSE"]))
+nonterminal_pred = c(min(LM_nonterminal$results["RMSE"]),min(GLM_nonterminal$results["RMSE"]),
+                  min(KNN_nonterminal$results["RMSE"]))
+terminal_perf = c(lm_t_perf,glm_t_perf,knn_t_perf)
+nonterminal_perf = c(lm_n_perf,glm_n_perf,knn_n_perf)
+modelnames = c('Linear model','General linear model','K-nearest neighbours')
+
+perfreport = data.frame(Method = modelnames,terminal_predicted = terminal_pred,terminal_actual = terminal_perf,
+                        nonterminal_predicted = nonterminal_pred, nonterminal_actual = nonterminal_perf,
+                        loss = nonterminal_perf - terminal_perf)
+  
+kable(perfreport, align = c('c','c','c','c','c','c'))
+```
+
+\newpage
+## Conclusion
+The result of this short project indicate that (at least for the models deployed here) higher accuracy is obtained in the prediction of age in both adult and infant abalone when parameters that require culling of the animal are utilized. However, in the case of infant abalone the reduction in accuracy is particularly small and may be considered negligable. This is not to say that the culling of abalone to definitively establish age is unwaranted or ethically unjustified. However a conceptually similar approach may be worthy of consideration by (for example) conservation ecologists to establish whether an acceptably accurate measurement of age can be obtained while preserving population numbers.
+
+
+
+## References
+
+
