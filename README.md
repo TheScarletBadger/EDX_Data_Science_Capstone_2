@@ -1,2 +1,2 @@
-# EDX_capstone_2
-Final project for edx capstone 2
+# EDX Data science capstone project 2
+Final project submission for edx capstone 2
